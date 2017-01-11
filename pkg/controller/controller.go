@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	tprName = "etcd-cluster.coreos.com"
+	TPRName = "etcd-cluster.coreos.com"
 
 	defaultVersion = "v3.1.0-alpha.1"
 )

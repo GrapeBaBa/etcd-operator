@@ -114,14 +114,16 @@ func (c *Cluster) migrateBootMember() error {
 		return err
 	}
 
-	delay := 20 * time.Second
-	c.logger.Infof("wait %v before removing the boot member", delay)
-	time.Sleep(delay)
+	go func() {
+		delay := 60 * time.Second
+		c.logger.Infof("wait %v before removing the boot member", delay)
+		time.Sleep(delay)
 
-	err = etcdutil.RemoveMember([]string{"http://" + pod.Status.PodIP + ":2379"}, bootMember.ID)
-	if err != nil {
-		return fmt.Errorf("etcdcli failed to remove boot member: %v", err)
-	}
+		err = etcdutil.RemoveMember([]string{"http://" + pod.Status.PodIP + ":2379"}, bootMember.ID)
+		if err != nil {
+			return fmt.Errorf("etcdcli failed to remove boot member: %v", err)
+		}
+	}()
 
 	c.logger.Infof("self-hosted cluster created with boot member (%s)", endpoint)
 
