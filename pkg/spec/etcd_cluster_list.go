@@ -14,9 +14,7 @@
 
 package spec
 
-import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
-)
+import "k8s.io/client-go/pkg/api/unversioned"
 
 // EtcdClusterList is a list of etcd clusters.
 type EtcdClusterList struct {

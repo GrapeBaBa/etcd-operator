@@ -20,17 +20,17 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"golang.org/x/time/rate"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/pkg/labels"
 )
 
 // Monkeys knows how to crush pods and nodes.
 type Monkeys struct {
-	k8s *unversioned.Client
+	k8s kubernetes.Interface
 }
 
-func NewMonkeys(k8s *unversioned.Client) *Monkeys {
+func NewMonkeys(k8s kubernetes.Interface) *Monkeys {
 	return &Monkeys{k8s: k8s}
 }
 
@@ -64,7 +64,7 @@ func (m *Monkeys) CrushPods(ctx context.Context, c *CrashConfig) {
 			continue
 		}
 
-		pods, err := m.k8s.Pods(ns).List(api.ListOptions{LabelSelector: ls})
+		pods, err := m.k8s.CoreV1().Pods(ns).List(v1.ListOptions{LabelSelector: ls.String()})
 		if err != nil {
 			logrus.Errorf("failed to list pods for selector %v: %v", ls.String(), err)
 			continue
@@ -88,7 +88,7 @@ func (m *Monkeys) CrushPods(ctx context.Context, c *CrashConfig) {
 		}
 
 		for tokill := range tokills {
-			err = m.k8s.Pods(ns).Delete(tokill, api.NewDeleteOptions(0))
+			err = m.k8s.CoreV1().Pods(ns).Delete(tokill, v1.NewDeleteOptions(0))
 			if err != nil {
 				logrus.Errorf("failed to kill pod %v: %v", tokill, err)
 				continue

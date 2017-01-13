@@ -18,8 +18,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"testing"
 	"time"
 
@@ -33,10 +31,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/coreos/etcd/clientv3"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	k8sclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/client-go/pkg/api/unversioned"
+	"k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/pkg/labels"
 )
 
 const (
@@ -48,17 +45,19 @@ const (
 )
 
 func waitBackupPodUp(f *framework.Framework, clusterName string, timeout time.Duration) error {
+	ls := labels.SelectorFromSet(map[string]string{
+		"app":          k8sutil.BackupPodSelectorAppField,
+		"etcd_cluster": clusterName,
+	})
 	return retryutil.Retry(5*time.Second, int(timeout/(5*time.Second)), func() (done bool, err error) {
-		podList, err := f.KubeClient.Pods(f.Namespace).List(api.ListOptions{
-			LabelSelector: labels.SelectorFromSet(map[string]string{
-				"app":          k8sutil.BackupPodSelectorAppField,
-				"etcd_cluster": clusterName,
-			})})
+		podList, err := f.KubeClient.CoreV1().Pods(f.Namespace).List(v1.ListOptions{
+			LabelSelector: ls.String(),
+		})
 		if err != nil {
 			return false, err
 		}
 		for i := range podList.Items {
-			if podList.Items[i].Status.Phase == api.PodRunning {
+			if podList.Items[i].Status.Phase == v1.PodRunning {
 				return true, nil
 			}
 		}
@@ -67,12 +66,12 @@ func waitBackupPodUp(f *framework.Framework, clusterName string, timeout time.Du
 }
 
 func makeBackup(f *framework.Framework, clusterName string) error {
-	ls := map[string]string{
+	ls := labels.SelectorFromSet(map[string]string{
 		"app":          k8sutil.BackupPodSelectorAppField,
 		"etcd_cluster": clusterName,
-	}
-	podList, err := f.KubeClient.Pods(f.Namespace).List(api.ListOptions{
-		LabelSelector: labels.SelectorFromSet(ls),
+	})
+	podList, err := f.KubeClient.CoreV1().Pods(f.Namespace).List(v1.ListOptions{
+		LabelSelector: ls.String(),
 	})
 	if err != nil {
 		return err
@@ -83,7 +82,7 @@ func makeBackup(f *framework.Framework, clusterName string) error {
 
 	// We are assuming pod ip is accessible from test machine.
 	addr := fmt.Sprintf("%s:%d", podList.Items[0].Status.PodIP, constants.DefaultBackupPodHTTPPort)
-	err = cluster.RequestBackupNow(f.KubeClient.Client, addr)
+	err = cluster.RequestBackupNow(addr)
 	if err != nil {
 		return fmt.Errorf("backup pod (%s): %v", podList.Items[0].Name, err)
 	}
@@ -91,20 +90,20 @@ func makeBackup(f *framework.Framework, clusterName string) error {
 }
 
 func waitUntilSizeReached(t *testing.T, f *framework.Framework, clusterName string, size int, timeout time.Duration) ([]string, error) {
-	return waitSizeReachedWithAccept(t, f, clusterName, size, timeout, func(*api.Pod) bool { return true })
+	return waitSizeReachedWithAccept(t, f, clusterName, size, timeout, func(*v1.Pod) bool { return true })
 }
 
-func waitSizeReachedWithAccept(t *testing.T, f *framework.Framework, clusterName string, size int, timeout time.Duration, acceptPod func(*api.Pod) bool) ([]string, error) {
+func waitSizeReachedWithAccept(t *testing.T, f *framework.Framework, clusterName string, size int, timeout time.Duration, acceptPod func(*v1.Pod) bool) ([]string, error) {
 	var names []string
 	err := retryutil.Retry(10*time.Second, int(timeout/(10*time.Second)), func() (done bool, err error) {
-		podList, err := f.KubeClient.Pods(f.Namespace).List(k8sutil.ClusterListOpt(clusterName))
+		podList, err := f.KubeClient.CoreV1().Pods(f.Namespace).List(k8sutil.ClusterListOpt(clusterName))
 		if err != nil {
 			return false, err
 		}
 		names = nil
 		for i := range podList.Items {
 			pod := &podList.Items[i]
-			if pod.Status.Phase != api.PodRunning || !acceptPod(pod) {
+			if pod.Status.Phase != v1.PodRunning || !acceptPod(pod) {
 				continue
 			}
 			names = append(names, pod.Name)
@@ -124,7 +123,7 @@ func waitSizeReachedWithAccept(t *testing.T, f *framework.Framework, clusterName
 
 func killMembers(f *framework.Framework, names ...string) error {
 	for _, name := range names {
-		err := f.KubeClient.Pods(f.Namespace).Delete(name, api.NewDeleteOptions(0))
+		err := f.KubeClient.CoreV1().Pods(f.Namespace).Delete(name, v1.NewDeleteOptions(0))
 		if err != nil && !k8sutil.IsKubernetesResourceNotFoundError(err) {
 			return err
 		}
@@ -138,7 +137,7 @@ func makeEtcdCluster(genName string, size int) *spec.EtcdCluster {
 			Kind:       "EtcdCluster",
 			APIVersion: "coreos.com/v1",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: v1.ObjectMeta{
 			GenerateName: genName,
 		},
 		Spec: &spec.ClusterSpec{
@@ -178,23 +177,13 @@ func etcdClusterWithVersion(ec *spec.EtcdCluster, version string) *spec.EtcdClus
 }
 
 func createEtcdCluster(t *testing.T, f *framework.Framework, e *spec.EtcdCluster) (*spec.EtcdCluster, error) {
-	b, err := json.Marshal(e)
+	uri := fmt.Sprintf("/apis/coreos.com/v1/namespaces/%s/etcdclusters", f.Namespace)
+	b, err := f.KubeClient.CoreV1().RESTClient().Post().Body(e).RequestURI(uri).DoRaw()
 	if err != nil {
 		return nil, err
 	}
-	resp, err := f.KubeClient.Client.Post(
-		fmt.Sprintf("%s/apis/coreos.com/v1/namespaces/%s/etcdclusters", f.MasterHost, f.Namespace),
-		"application/json", bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("unexpected status: %v", resp.Status)
-	}
-	decoder := json.NewDecoder(resp.Body)
 	res := &spec.EtcdCluster{}
-	if err := decoder.Decode(res); err != nil {
+	if err := json.Unmarshal(b, res); err != nil {
 		return nil, err
 	}
 	logfWithTimestamp(t, "created etcd cluster: %v", res.Name)
@@ -202,11 +191,11 @@ func createEtcdCluster(t *testing.T, f *framework.Framework, e *spec.EtcdCluster
 }
 
 func updateEtcdCluster(f *framework.Framework, e *spec.EtcdCluster) (*spec.EtcdCluster, error) {
-	return k8sutil.UpdateClusterTPRObjectUnconditionally(f.KubeClient, f.MasterHost, f.Namespace, e)
+	return k8sutil.UpdateClusterTPRObjectUnconditionally(f.KubeClient.CoreV1().RESTClient(), f.Namespace, e)
 }
 
 func deleteEtcdCluster(t *testing.T, f *framework.Framework, e *spec.EtcdCluster) error {
-	podList, err := f.KubeClient.Pods(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
+	podList, err := f.KubeClient.CoreV1().Pods(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
 	if err != nil {
 		return err
 	}
@@ -215,30 +204,16 @@ func deleteEtcdCluster(t *testing.T, f *framework.Framework, e *spec.EtcdCluster
 		t.Logf("pod (%v): status (%v), cmd (%v)", pod.Name, pod.Status.Phase, pod.Spec.Containers[0].Command)
 	}
 
-	buf := bytes.NewBuffer(nil)
-	if err := getLogs(f.KubeClient, f.Namespace, "etcd-operator", "etcd-operator", buf); err != nil {
+	uri := fmt.Sprintf("/apis/coreos.com/v1/namespaces/%s/etcdclusters/%s", f.Namespace, e.Name)
+	if _, err := f.KubeClient.CoreV1().RESTClient().Delete().RequestURI(uri).DoRaw(); err != nil {
 		return err
-	}
-
-	req, err := http.NewRequest("DELETE",
-		fmt.Sprintf("%s/apis/coreos.com/v1/namespaces/%s/etcdclusters/%s", f.MasterHost, f.Namespace, e.Name), nil)
-	if err != nil {
-		return err
-	}
-	resp, err := f.KubeClient.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status: %v", resp.Status)
 	}
 	return waitResourcesDeleted(t, f, e)
 }
 
 func waitResourcesDeleted(t *testing.T, f *framework.Framework, e *spec.EtcdCluster) error {
 	err := retryutil.Retry(5*time.Second, 5, func() (done bool, err error) {
-		list, err := f.KubeClient.Pods(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
+		list, err := f.KubeClient.CoreV1().Pods(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
 		if err != nil {
 			return false, err
 		}
@@ -262,7 +237,7 @@ func waitResourcesDeleted(t *testing.T, f *framework.Framework, e *spec.EtcdClus
 	}
 
 	err = retryutil.Retry(5*time.Second, 5, func() (done bool, err error) {
-		list, err := f.KubeClient.Services(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
+		list, err := f.KubeClient.CoreV1().Services(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
 		if err != nil {
 			return false, err
 		}
@@ -287,7 +262,7 @@ func waitResourcesDeleted(t *testing.T, f *framework.Framework, e *spec.EtcdClus
 
 func waitBackupDeleted(f *framework.Framework, e *spec.EtcdCluster) error {
 	err := retryutil.Retry(5*time.Second, 5, func() (done bool, err error) {
-		rl, err := f.KubeClient.ReplicaSets(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
+		rl, err := f.KubeClient.ExtensionsV1beta1().ReplicaSets(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
 		if err != nil {
 			return false, err
 		}
@@ -308,7 +283,7 @@ func waitBackupDeleted(f *framework.Framework, e *spec.EtcdCluster) error {
 	err = retryutil.Retry(5*time.Second, 5, func() (done bool, err error) {
 		switch e.Spec.Backup.StorageType {
 		case spec.BackupStorageTypePersistentVolume, spec.BackupStorageTypeDefault:
-			pl, err := f.KubeClient.PersistentVolumeClaims(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
+			pl, err := f.KubeClient.CoreV1().PersistentVolumeClaims(f.Namespace).List(k8sutil.ClusterListOpt(e.Name))
 			if err != nil {
 				return false, err
 			}
@@ -335,26 +310,7 @@ func waitBackupDeleted(f *framework.Framework, e *spec.EtcdCluster) error {
 	return nil
 }
 
-func getLogs(kubecli *k8sclient.Client, ns, p, c string, out io.Writer) error {
-	req := kubecli.RESTClient.Get().
-		Namespace(ns).
-		Resource("pods").
-		Name(p).
-		SubResource("log").
-		Param("container", c).
-		Param("tailLines", "20")
-
-	readCloser, err := req.Stream()
-	if err != nil {
-		return err
-	}
-	defer readCloser.Close()
-
-	_, err = io.Copy(out, readCloser)
-	return err
-}
-
-func printContainerStatus(buf *bytes.Buffer, ss []api.ContainerStatus) {
+func printContainerStatus(buf *bytes.Buffer, ss []v1.ContainerStatus) {
 	for _, s := range ss {
 		if s.State.Waiting != nil {
 			buf.WriteString(fmt.Sprintf("%s: Waiting: message (%s) reason (%s)\n", s.Name, s.State.Waiting.Message, s.State.Waiting.Reason))
